@@ -10,7 +10,7 @@ import numpy as np
 import requests
 import faiss
 from PyPDF2 import PdfReader
-from sentence_transformers import SentenceTransformer
+from functools import lru_cache
 
 # --- Setup FastAPI App ---
 app = FastAPI()
@@ -32,8 +32,11 @@ os.makedirs(INDEX_DIR, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 
-# --- Models ---
-text_model = SentenceTransformer("all-MiniLM-L6-v2")
+# --- Lazy Model Loader ---
+@lru_cache()
+def get_model():
+    from sentence_transformers import SentenceTransformer
+    return SentenceTransformer("all-MiniLM-L6-v2")
 
 # --- Schema ---
 class AskRequest(BaseModel):
@@ -52,7 +55,8 @@ def parse_text(file_path):
     return chunks
 
 def embed_and_index(doc_id, chunks):
-    embeddings = text_model.encode(chunks)
+    model = get_model()
+    embeddings = model.encode(chunks)
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
     faiss.write_index(index, os.path.join(INDEX_DIR, f"{doc_id}.index"))
@@ -90,7 +94,8 @@ def list_docs():
 
 @app.post("/ask")
 async def ask_doc(data: AskRequest):
-    query_embed = text_model.encode([data.question])
+    model = get_model()
+    query_embed = model.encode([data.question])
     doc_id = data.doc_id
 
     index_path = os.path.join(INDEX_DIR, f"{doc_id}.index")
@@ -129,7 +134,7 @@ def serve_pdf(filename: str):
         return JSONResponse(status_code=404, content={"error": "PDF not found"})
     return FileResponse(path, media_type="application/pdf")
 
-
+# --- Startup ---
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=10000)
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
