@@ -1,0 +1,135 @@
+from fastapi import FastAPI, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+import os
+import json
+import numpy as np
+import requests
+import faiss
+from PyPDF2 import PdfReader
+from sentence_transformers import SentenceTransformer
+
+# --- Setup FastAPI App ---
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- Directories ---
+UPLOAD_DIR = "pdfs"
+TEXT_DIR = "data"
+INDEX_DIR = "index"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(TEXT_DIR, exist_ok=True)
+os.makedirs(INDEX_DIR, exist_ok=True)
+
+app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
+
+# --- Models ---
+text_model = SentenceTransformer("all-MiniLM-L6-v2")
+
+# --- Schema ---
+class AskRequest(BaseModel):
+    question: str
+    doc_id: str = ""
+
+# --- PDF Parsing ---
+def parse_text(file_path):
+    chunks = []
+    reader = PdfReader(file_path)
+    for page in reader.pages:
+        text = page.extract_text()
+        if text:
+            cleaned = text.strip().replace("\n", " ")
+            chunks.append(cleaned)
+    return chunks
+
+def embed_and_index(doc_id, chunks):
+    embeddings = text_model.encode(chunks)
+    index = faiss.IndexFlatL2(embeddings.shape[1])
+    index.add(embeddings)
+    faiss.write_index(index, os.path.join(INDEX_DIR, f"{doc_id}.index"))
+    with open(os.path.join(TEXT_DIR, f"{doc_id}.json"), "w", encoding="utf-8") as f:
+        json.dump({"chunks": chunks}, f)
+
+# --- Answering ---
+def call_mistral(prompt):
+    res = requests.post("http://localhost:11434/api/generate", json={
+        "model": "mistral",
+        "prompt": prompt,
+        "stream": False
+    })
+    return res.json().get("response", "[No response]")
+
+# --- Endpoints ---
+@app.post("/upload_pdf")
+async def upload_pdf(file: UploadFile):
+    ext = os.path.splitext(file.filename)[-1]
+    doc_id = os.path.splitext(file.filename)[0].replace(" ", "_")
+    file_path = os.path.join(UPLOAD_DIR, f"{doc_id}{ext}")
+    with open(file_path, "wb") as f:
+        f.write(await file.read())
+
+    chunks = parse_text(file_path)
+    embed_and_index(doc_id, chunks)
+
+    return {"doc_id": doc_id, "text_chunks": len(chunks)}
+
+@app.get("/list_docs")
+def list_docs():
+    return {
+        "docs": [f.replace(".json", "") for f in os.listdir(TEXT_DIR) if f.endswith(".json")]
+    }
+
+@app.post("/ask")
+async def ask_doc(data: AskRequest):
+    query_embed = text_model.encode([data.question])
+    doc_id = data.doc_id
+
+    index_path = os.path.join(INDEX_DIR, f"{doc_id}.index")
+    json_path = os.path.join(TEXT_DIR, f"{doc_id}.json")
+
+    if not os.path.exists(index_path) or not os.path.exists(json_path):
+        return JSONResponse(status_code=404, content={"error": "Document not indexed."})
+
+    index = faiss.read_index(index_path)
+    with open(json_path, "r", encoding="utf-8") as f:
+        chunks = json.load(f)["chunks"]
+
+    D, I = index.search(np.array(query_embed), k=1)
+    context = chunks[I[0][0]]
+
+    prompt = f"""Use the context below to answer the question.
+
+Context:
+{context}
+
+Question: {data.question}
+Answer:"""
+    answer = call_mistral(prompt)
+
+    return {
+        "answer": answer,
+        "doc_id": doc_id,
+        "context": context,
+        "pdf_url": f"/static/{doc_id}.pdf"
+    }
+
+@app.get("/pdfs/{filename}")
+def serve_pdf(filename: str):
+    path = os.path.join(UPLOAD_DIR, filename)
+    if not os.path.exists(path):
+        return JSONResponse(status_code=404, content={"error": "PDF not found"})
+    return FileResponse(path, media_type="application/pdf")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=10000)
