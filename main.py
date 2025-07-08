@@ -13,7 +13,11 @@ from PyPDF2 import PdfReader
 from functools import lru_cache
 
 # --- Setup FastAPI App ---
-app = FastAPI()
+app = FastAPI(
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
