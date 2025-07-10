@@ -11,13 +11,11 @@ import requests
 import faiss
 from PyPDF2 import PdfReader
 from functools import lru_cache
+import uvicorn
 
 # --- Setup FastAPI App ---
-app = FastAPI(
-    docs_url=None,
-    redoc_url=None,
-    openapi_url=None
-)
+app = FastAPI()  # ✅ restored with Swagger support
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -36,7 +34,7 @@ os.makedirs(INDEX_DIR, exist_ok=True)
 
 app.mount("/static", StaticFiles(directory=UPLOAD_DIR), name="static")
 
-# --- Lazy Model Loader ---
+# --- Lazy model loader ---
 @lru_cache()
 def get_model():
     from sentence_transformers import SentenceTransformer
@@ -67,7 +65,7 @@ def embed_and_index(doc_id, chunks):
     with open(os.path.join(TEXT_DIR, f"{doc_id}.json"), "w", encoding="utf-8") as f:
         json.dump({"chunks": chunks}, f)
 
-# --- Answering ---
+# --- LLM Call ---
 def call_mistral(prompt):
     res = requests.post("http://localhost:11434/api/generate", json={
         "model": "mistral",
@@ -138,7 +136,7 @@ def serve_pdf(filename: str):
         return JSONResponse(status_code=404, content={"error": "PDF not found"})
     return FileResponse(path, media_type="application/pdf")
 
-# --- Startup ---
+# --- Run App ---
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
+    port = int(os.environ.get("PORT", 8080))
+    uvicorn.run("app:app", host="0.0.0.0", port=port)
